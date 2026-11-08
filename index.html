@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lik o Naqsh</title>
+<style>
+:root{--bg:#f2f4f7;--fg:#161a22;--card:#e4e8ee;--acc:#0f7a5f;--mut:#5d6675}
+:root[data-theme=dark]{--bg:#101318;--fg:#e8ebf0;--card:#1b2029;--acc:#3ecf9e;--mut:#8b94a3}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,sans-serif}
+header{position:sticky;top:0;z-index:5;display:flex;gap:8px;align-items:center;padding:10px 12px;background:var(--card)}
+header h1{font-size:19px;margin:0;flex:1;cursor:pointer;color:var(--acc)}
+button,select{background:var(--bg);color:var(--fg);border:1px solid var(--mut);border-radius:8px;padding:8px 12px;font-size:14px}
+button:disabled{opacity:.4}
+main{max-width:860px;margin:0 auto;padding:12px}
+.item{background:var(--card);border-radius:10px;padding:14px;margin:8px 0;cursor:pointer;border-left:4px solid var(--acc)}
+.item small{display:block;color:var(--mut)}
+#pages img{display:block;width:100%;max-width:800px;min-height:120px;margin:0 auto;background:var(--card)}
+#book{text-align:center}
+#book img{max-width:100%;max-height:calc(100vh - 150px);touch-action:pan-y}
+.bar{display:flex;gap:10px;justify-content:center;align-items:center;padding:10px;flex-wrap:wrap}
+.msg{color:var(--mut);text-align:center;padding:30px}
+</style>
+</head>
+<body>
+<header>
+  <h1 id="logo">Lik o Naqsh</h1>
+  <button id="mode"></button>
+  <button id="theme"></button>
+</header>
+<main id="main"></main>
+<script>
+// ---- Settings: paste your own values here ----
+const SB_URL = 'https://gzbzijqfnrfetjycbmqi.supabase.co';
+const SB_KEY = 'sb_publishable_gTsHFDof2JUTNYU9HL6JWQ_6WqxnTGo';
+const BUCKET = 'manga-pages';
+
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch(e){ return d; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} }
+};
+async function api(path){
+  const r = await fetch(SB_URL + '/rest/v1/' + path, { headers: { apikey: SB_KEY } });
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+const imgUrl = p => SB_URL + '/storage/v1/object/public/' + BUCKET + '/' + String(p).split('/').map(encodeURIComponent).join('/');
+
+const st = { sid:0, sname:'', chapters:[], idx:0, pages:[], cid:0, page:0, mode: store.get('mode','v'), speed:0 };
+
+// ---- Theme and mode ----
+let theme = store.get('theme', matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+function labels(){
+  document.documentElement.dataset.theme = theme;
+  $('#theme').textContent = theme === 'dark' ? 'Light theme' : 'Dark theme';
+  $('#mode').textContent = st.mode === 'v' ? 'Reading: scroll' : 'Reading: book';
+}
+$('#theme').onclick = () => { theme = theme === 'dark' ? 'light' : 'dark'; store.set('theme', theme); labels(); };
+$('#mode').onclick = () => {
+  setSpeed(0);
+  st.mode = st.mode === 'v' ? 'h' : 'v';
+  store.set('mode', st.mode); labels();
+  if ($('#body')) draw(0);
+};
+$('#logo').onclick = () => home();
+
+// ---- Auto-scroll (0x to 4x) ----
+let raf = 0, acc = 0, lastT = 0;
+function tick(t){
+  if (!st.speed) { raf = 0; return; }
+  acc += st.speed * 40 * ((t - lastT) / 1000); lastT = t;
+  if (acc >= 1) { const n = Math.floor(acc); window.scrollBy(0, n); acc -= n; }
+  raf = requestAnimationFrame(tick);
+}
+function setSpeed(v){
+  st.speed = +v; cancelAnimationFrame(raf); raf = 0;
+  if (st.speed) { lastT = performance.now(); raf = requestAnimationFrame(tick); }
+}
+
+// ---- Home: list of manga ----
+async function home(){
+  setSpeed(0);
+  const m = $('#main'); m.innerHTML = '<div class="msg">Loading...</div>';
+  try {
+    const list = await api('series?select=id,name,description&order=created_at.desc');
+    const last = store.get('last', null);
+    let h = '';
+    if (last) h += `<div class="item" data-resume="1"><b>Continue reading</b><small>${esc(last.sname)}, chapter ${esc(last.num)}</small></div>`;
+    h += list.length
+      ? list.map(s => `<div class="item" data-sid="${s.id}" data-name="${esc(s.name)}"><b>${esc(s.name)}</b><small>${esc(s.description)}</small></div>`).join('')
+      : '<div class="msg">No manga yet. Creators will add some soon.</div>';
+    m.innerHTML = h;
+    m.onclick = e => {
+      const it = e.target.closest('.item'); if (!it) return;
+      if (it.dataset.resume) openSeries(last.sid, last.sname, last.cid);
+      else openSeries(+it.dataset.sid, it.dataset.name);
+    };
+  } catch(e) { m.innerHTML = '<div class="msg">Could not load. Check your internet and try again.</div>'; }
+}
+
+// ---- Chapter list ----
+async function openSeries(id, name, cid){
+  setSpeed(0);
+  const m = $('#main'); m.onclick = null; m.innerHTML = '<div class="msg">Loading...</div>';
+  try {
+    st.sid = id; st.sname = name;
+    st.chapters = await api('chapters?series_id=eq.' + id + '&select=id,num,title&order=num.asc');
+    if (cid) { const i = st.chapters.findIndex(c => c.id === cid); if (i >= 0) return openChapter(i); }
+    m.innerHTML = `<button id="back">Back</button><h2>${esc(name)}</h2>` +
+      (st.chapters.length
+        ? st.chapters.map((c, i) => `<div class="item" data-i="${i}"><b>Chapter ${esc(c.num)}</b><small>${esc(c.title)}</small></div>`).join('')
+        : '<div class="msg">No chapters yet.</div>');
+    $('#back').onclick = home;
+    m.onclick = e => { const it = e.target.closest('.item'); if (it) openChapter(+it.dataset.i); };
+  } catch(e) { m.innerHTML = '<div class="msg">Could not load chapters. Try again.</div>'; }
+}
+
+// ---- Reader ----
+async function openChapter(i){
+  setSpeed(0);
+  const c = st.chapters[i]; if (!c) return;
+  const m = $('#main'); m.onclick = null; m.innerHTML = '<div class="msg">Loading...</div>';
+  try { st.pages = await api('pages?chapter_id=eq.' + c.id + '&select=page_no,path&order=page_no.asc'); }
+  catch(e) { m.innerHTML = '<div class="msg">Could not load pages. Try again.</div>'; return; }
+  st.idx = i; st.cid = c.id;
+  const pos = store.get('pos', {});
+  const same = pos.cid === c.id;
+  st.page = same ? (pos.page || 0) : 0;
+  store.set('last', { sid: st.sid, sname: st.sname, cid: c.id, num: c.num });
+  draw(same ? (pos.y || 0) : 0);
+  window.scrollTo(0, 0);
+}
+function draw(y){
+  const c = st.chapters[st.idx], m = $('#main');
+  m.innerHTML = `<div class="bar"><button id="pc" ${st.idx ? '' : 'disabled'}>Previous</button><b>Chapter ${esc(c.num)}</b><button id="nc" ${st.idx < st.chapters.length - 1 ? '' : 'disabled'}>Next</button></div><div id="body"></div><div class="bar" id="ctl"></div>`;
+  $('#pc').onclick = () => openChapter(st.idx - 1);
+  $('#nc').onclick = () => openChapter(st.idx + 1);
+  if (!st.pages.length) { $('#body').innerHTML = '<div class="msg">No pages in this chapter.</div>'; return; }
+  if (st.mode === 'v') {
+    $('#body').innerHTML = '<div id="pages">' + st.pages.map(p => `<img src="${esc(imgUrl(p.path))}" loading="lazy" alt="">`).join('') + '</div>';
+    $('#ctl').innerHTML = '<label>Auto-scroll <select id="sp">' + [0, .5, 1, 2, 3, 4].map(v => `<option value="${v}">${v}x</option>`).join('') + '</select></label>';
+    $('#sp').onchange = e => setSpeed(e.target.value);
+    setTimeout(() => window.scrollTo(0, y), 600);
+  } else { showPage(); }
+}
+function showPage(){
+  const p = st.pages[st.page];
+  $('#body').innerHTML = `<div id="book"><img src="${esc(imgUrl(p.path))}" alt=""></div>`;
+  $('#ctl').innerHTML = `<button id="pp">Back</button><span>${st.page + 1} / ${st.pages.length}</span><button id="np">Forward</button>`;
+  $('#pp').onclick = () => go(-1); $('#np').onclick = () => go(1);
+  const im = $('#book img');
+  im.onclick = e => go(e.offsetX < im.clientWidth / 2 ? -1 : 1);
+  let x0 = 0;
+  im.ontouchstart = e => { x0 = e.touches[0].clientX; };
+  im.ontouchend = e => { const dx = e.changedTouches[0].clientX - x0; if (Math.abs(dx) > 50) go(dx < 0 ? 1 : -1); };
+  store.set('pos', { cid: st.cid, y: 0, page: st.page });
+}
+function go(d){
+  const n = st.page + d;
+  if (n < 0) { if (st.idx) openChapter(st.idx - 1); return; }
+  if (n >= st.pages.length) { if (st.idx < st.chapters.length - 1) openChapter(st.idx + 1); return; }
+  st.page = n; showPage();
+}
+let saveT = 0;
+addEventListener('scroll', () => {
+  if (st.mode !== 'v' || !$('#pages')) return;
+  clearTimeout(saveT);
+  saveT = setTimeout(() => store.set('pos', { cid: st.cid, y: scrollY, page: 0 }), 300);
+});
+
+labels();
+home();
+</script>
+</body>
+</html>
